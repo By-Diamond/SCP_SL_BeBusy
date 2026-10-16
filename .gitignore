@@ -1,0 +1,27 @@
+# ---- Python 生成物 ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ---- 构建产物（build.bat 会重新生成）----
+build/
+dist/
+*.spec
+assets/app.ico
+
+# ---- 运行数据（你自己的，不上传）----
+*.log
+settings.json
+state_log.csv
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 临时文件 ----
+*.tmp
+*.bak
+tests/_newops_tmp/
