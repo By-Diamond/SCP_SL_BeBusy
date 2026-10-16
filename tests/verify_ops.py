@@ -8,6 +8,7 @@
 import os
 import shutil
 import sys
+import threading
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,8 @@ import config as cfgmod                                        # noqa: E402
 import operations as ops                                       # noqa: E402
 import opsmodel                                                # noqa: E402
 import win32_window as w32                                     # noqa: E402
+
+_REAL_LIST_WINDOWS = w32.list_windows                          # [B] 会把它换成假窗口表，先留真身
 
 TMP = os.path.join(HERE, "_newops_tmp")
 shutil.rmtree(TMP, ignore_errors=True)
@@ -86,12 +89,16 @@ class FakeCore(object):
 class FakeCtx(ops.OpContext):
     """真 OpContext + 假的外部动作。"""
 
-    def __init__(self, hwnd=0, found=None):
+    def __init__(self, hwnd=0, found=None, is_game=None, game_found=None):
         ops.OpContext.__init__(self, audio=None, hwnd=hwnd, logger=self._line)
         self.lines = []
         self.calls = []
         self.hwnd_found = hwnd if found is None else found
         self.lookup_window = self._lookup
+        # 游戏窗口：默认"缓存句柄有效、现查也返回它"；传参可模拟游戏重启 / 句柄失效
+        self.is_game = (lambda h: bool(h)) if is_game is None else is_game
+        self.game_found = hwnd if game_found is None else game_found
+        self.find_game = self._find_game
         self.focus = lambda h: (self.calls.append(("focus", h)), True)[1]
         self.minimize = lambda h: (self.calls.append(("minimize", h)), True)[1]
         self.open_file = lambda p: (self.calls.append(("open_file", p)), (True, "已打开"))[1]
@@ -102,6 +109,10 @@ class FakeCtx(ops.OpContext):
     def _lookup(self, target):
         self.calls.append(("lookup", target))
         return self.hwnd_found
+
+    def _find_game(self):
+        self.calls.append(("find_game",))
+        return self.game_found
 
 
 # ============================================================ [A] 注册表
@@ -381,7 +392,7 @@ check("F8 未知操作类型老实报错",
       ops.run_item({"type": "nope", "params": {}}, ctx)[0], False)
 check("F9 游戏没开时切换有明确提示",
       ops.run_item({"type": "focus_game", "params": {}}, FakeCtx(hwnd=0))[1],
-      "还没锁定 SCPSL 窗口（游戏没开？）")
+      "没找到游戏窗口（游戏没开？）")
 
 # ============================================================ [G] 冒烟
 p("[G] 冒烟：所有模块还能导入、关键常量没变")
@@ -533,6 +544,291 @@ check("J9 mark 手动对齐能用（托盘「手动」走这条路）",
       [(_a9.mark(v), _a9.state_text())[1] for v in (True, False, None)],
       ["播放中", "暂停中", "未知"])
 audio_actions.send_media_play_pause = _real_send
+
+# ============================================================ [K] 游戏窗口实时查找
+p("[K] 游戏窗口：执行时现查现验（游戏重启换句柄也照样生效）")
+
+_real_w32 = (w32.available, w32.is_window, w32.proc_name_of, w32.list_windows,
+             w32.window_area, w32.is_minimized)
+try:
+    w32.available = lambda: True                     # 假装在 Windows 上
+    w32.is_window = lambda h: bool(h)
+    w32.proc_name_of = lambda h: {11: "notepad.exe", 55: "scpsl.exe",
+                                  77: "scpsl.exe"}.get(h, "")
+    w32.list_windows = lambda: [
+        (11, "chrome 相关的东西 - 记事本", "notepad.exe"),
+        (77, "SCP: Secret Laboratory", "scpsl.exe"),
+    ]
+    check("K1 现查能认出游戏窗口（进程名含 scpsl）", w32.find_game_window(), 77)
+    check("K2 进程不是游戏 → 验不过（不会误伤别人的窗口）", w32.is_game_window(11), False)
+    check("K3 是游戏窗口 → 验得过", w32.is_game_window(77), True)
+    check("K4 句柄 0 一律不是游戏窗口", w32.is_game_window(0), False)
+    w32.list_windows = lambda: [(11, "x", "SCPSL.EXE")]      # 大写进程名也要认得出
+    check("K4b 大小写不敏感", w32.find_game_window(), 11)
+
+    w32.list_windows = lambda: [
+        (55, "SCPSL 启动器", "scpsl.exe"),
+        (77, "SCP: Secret Laboratory", "scpsl.exe"),
+    ]
+    w32.window_area = lambda h: {55: 100, 77: 1920 * 1080}.get(h, 0)
+    w32.is_minimized = lambda h: False
+    check("K5 多个游戏窗口 → 挑面积最大的主窗口", w32.find_game_window(), 77)
+    w32.is_minimized = lambda h: h == 77
+    check("K6 主窗口被最小化 → 挑没被最小化的那个", w32.find_game_window(), 55)
+
+    w32.list_windows = lambda: [(11, "chrome 相关的东西 - 记事本", "notepad.exe")]
+    check("K7 游戏没开 → 0（绝不返回旧句柄凑数）", w32.find_game_window(), 0)
+finally:
+    (w32.available, w32.is_window, w32.proc_name_of, w32.list_windows,
+     w32.window_area, w32.is_minimized) = _real_w32
+
+# —— 执行层：模拟「游戏重启换了句柄」等场景 ——
+_restart = FakeCtx(hwnd=1111, is_game=lambda h: False, game_found=2222)
+check("K8 游戏重启：旧句柄验不过 → 现查新句柄，打在**新**句柄上",
+      (ops.run_item({"type": "minimize_game", "params": {}}, _restart), _restart.calls[-1]),
+      ((True, "已把游戏最小化（窗口换了，已重找）"), ("minimize", 2222)))
+ok("K9 绝不拿过期句柄凑数", ("minimize", 1111) not in _restart.calls, str(_restart.calls))
+
+_recyc = FakeCtx(hwnd=1111, is_game=lambda h: False, game_found=2222)
+ops.run_item({"type": "focus_game", "params": {}}, _recyc)
+check("K10 切换到游戏界面同样现查（复活后那一步也一起修好）",
+      _recyc.calls[-1], ("focus", 2222))
+
+_cached = FakeCtx(hwnd=3333)
+check("K11 缓存句柄仍有效 → 直接用，不白枚举",
+      (ops.run_item({"type": "minimize_game", "params": {}}, _cached), _cached.calls),
+      ((True, "已把游戏最小化"), [("minimize", 3333)]))
+
+_nogame = FakeCtx(hwnd=0, is_game=lambda h: False, game_found=0)
+check("K12 游戏没开 → 老实报失败",
+      ops.run_item({"type": "minimize_game", "params": {}}, _nogame),
+      (False, "没找到游戏窗口（游戏没开？）"))
+ok("K13 找不着就什么都不动",
+   [c for c in _nogame.calls if c[0] != "find_game"] == [], str(_nogame.calls))
+
+_dead = FakeCtx(hwnd=4444)
+_dead.minimize = lambda h: (_dead.calls.append(("minimize", h)), False)[1]
+check("K14 最小化没生效 → 报 ⚠（不再谎报「已把游戏最小化」）",
+      ops.run_item({"type": "minimize_game", "params": {}}, _dead),
+      (False, "游戏最小化没生效（窗口可能已变）"))
+
+
+def _bare_det(hwnd):
+    """不跑 __init__ 的 Detector（不碰真文件），只给自愈逻辑要用的字段。"""
+    d = scpsl_state.Detector.__new__(scpsl_state.Detector)
+    d.lock = threading.Lock()
+    d.counts = {"death": 0, "alive": 0, "redraw": 0}
+    d.state = scpsl_state.STATE_ALIVE
+    d.t_death = 0.0
+    d.last_redraw_t = None
+    d.pre_log_jump_t = None
+    d.tail_pending = False
+    d.scpsl_hwnd = hwnd
+    d._f_log = d._csv = None
+    d.on_note = d.on_change = d.on_death_seen = None
+    return d
+
+
+_real_self = (scpsl_state.is_game_window, scpsl_state.find_scpsl_windows)
+try:
+    scpsl_state.is_game_window = lambda h: h in (777, 888)   # 假造：只有这俩是游戏窗口
+    d = _bare_det(1111)
+    d.on_redraw(888)
+    check("K15 红跳来自新的游戏窗口 → 自动重锁到新句柄", d.scpsl_hwnd, 888)
+
+    d2 = _bare_det(1111)
+    d2.on_redraw(999)                                        # 别的进程的窗口
+    check("K16 别的窗口的红跳 → 不动锁定", d2.scpsl_hwnd, 1111)
+
+    d3 = _bare_det(0)
+    scpsl_state.find_scpsl_windows = lambda: [{"hwnd": 777}]
+    check("K17 循环重查找到游戏 → 记下句柄", (d3._find_scpsl(), d3.scpsl_hwnd), (True, 777))
+    scpsl_state.find_scpsl_windows = lambda: []
+    check("K18 重查找不到 → 句柄清零（不留过期值）",
+          (d3._find_scpsl(), d3.scpsl_hwnd), (True, 0))
+finally:
+    scpsl_state.is_game_window, scpsl_state.find_scpsl_windows = _real_self
+
+
+# —— 端到端：**真** win32_window 函数 + 假 Win32 世界（模拟游戏重启 / 句柄被回收） ——
+class _FakeKernel(object):
+    """只够 win32_window._proc_name 用。"""
+
+    def __init__(self, world):
+        self.world = world
+
+    def OpenProcess(self, access, inherit, pid):
+        self.world._pid = int(pid or 0)
+        return 1 if self.world._pid in self.world.procs else 0
+
+    def QueryFullProcessImageNameW(self, h, flags, buf, size):
+        buf.value = self.world.procs.get(self.world._pid, "")
+        return 1
+
+    def CloseHandle(self, h):
+        return 1
+
+
+def _hwnd(x):
+    """把 c_void_p / int 都转成 int（假 Win32 收参数用；真 API 直接收指针）。"""
+    try:
+        return int(getattr(x, "value", x) or 0)
+    except Exception:
+        return 0
+
+
+class _FakeWin(object):
+    """假 Win32：一个窗口世界 + 最小化/前台状态。够 win32_window 用。"""
+
+    def __init__(self, wins, areas=None):
+        self.wins = {int(h): v for h, v in wins.items()}     # hwnd -> (标题, 进程名, pid)
+        self.areas = areas or {}
+        self.procs = {v[2]: "/x/" + v[1] for v in self.wins.values()}
+        self.iconic = set()
+        self.fg = 0
+        self.deny_fg = False                                 # True = 假装系统不给前台
+        self.fg_becomes = 0                                  # 非 0 = 系统把别的窗口推到前台
+        self.fg_old = 0                                      # 异步：切完之前前台还是旧的
+        self.fg_delay = 0                                    # 前 N 次查询仍返回旧前台
+        self.iconic_delay = 0                                # 前 N 次查询还没最小化完
+        self._pid = 0
+
+    def _title(self, hwnd):
+        return self.wins.get(_hwnd(hwnd), ("", "", 0))[0]
+
+    # --- user32 ---
+    def IsWindow(self, hwnd):
+        return 1 if _hwnd(hwnd) in self.wins else 0
+
+    def IsWindowVisible(self, hwnd):
+        return 1 if _hwnd(hwnd) in self.wins else 0
+
+    def IsIconic(self, hwnd):
+        if self.iconic_delay > 0:                            # 最小化是异步的
+            self.iconic_delay -= 1
+            return 0
+        return 1 if _hwnd(hwnd) in self.iconic else 0
+
+    def GetWindowTextLengthW(self, hwnd):
+        return len(self._title(hwnd))
+
+    def GetWindowTextW(self, hwnd, buf, n):
+        buf.value = self._title(hwnd)
+        return len(buf.value)
+
+    def GetWindowThreadProcessId(self, hwnd, out):
+        out._obj.value = self.wins.get(_hwnd(hwnd), ("", "", 0))[2]
+        return 1
+
+    def GetWindowRect(self, hwnd, out):
+        w, h = self.areas.get(_hwnd(hwnd), (100, 100))
+        out._obj.left, out._obj.top, out._obj.right, out._obj.bottom = 0, 0, w, h
+        return 1
+
+    def EnumWindows(self, cb, lparam):
+        for hwnd in list(self.wins):
+            cb(hwnd, 0)
+        return 1
+
+    def ShowWindow(self, hwnd, cmd):
+        if _hwnd(hwnd) not in self.wins:                     # 窗口没了 → 什么也不会发生
+            return 0
+        if cmd == w32.SW_MINIMIZE:
+            self.iconic.add(_hwnd(hwnd))
+        elif cmd == w32.SW_RESTORE:
+            self.iconic.discard(_hwnd(hwnd))
+        return 1
+
+    def SetForegroundWindow(self, hwnd):
+        if self.deny_fg:
+            return 0
+        self.fg = _hwnd(self.fg_becomes or hwnd)
+        return 1
+
+    def GetForegroundWindow(self):
+        if self.fg_delay > 0:                                # 切前台是异步的：还没换完
+            self.fg_delay -= 1
+            return self.fg_old
+        return self.fg
+
+    def SetWindowPos(self, *a, **k):
+        return 1
+
+
+def _fake_world(wins, areas=None):
+    w = _FakeWin(wins, areas)
+    w32.user32, w32.kernel32 = w, _FakeKernel(w)
+    return w
+
+
+_real_dlls = (w32.user32, w32.kernel32, w32.list_windows)
+try:
+    w32.list_windows = _REAL_LIST_WINDOWS                     # [B] 换过它，这里要真函数
+    BIG = 1920 * 1080
+    world = _fake_world({11: ("chrome - 记事本", "notepad.exe", 101),
+                         77: ("SCP: Secret Laboratory", "scpsl.exe", 202)},
+                        {11: (800, 600), 77: (BIG, BIG)})
+    ctx = ops.OpContext(hwnd=0, logger=lambda m: None)        # 没有任何缓存 → 必须现查
+    check("K19 端到端：现查到游戏窗口并真最小化",
+          (ops.run_item({"type": "minimize_game", "params": {}}, ctx), sorted(world.iconic)),
+          ((True, "已把游戏最小化"), [77]))
+
+    # 游戏重启：旧句柄 77 已不存在，新窗口是 88
+    world = _fake_world({11: ("chrome - 记事本", "notepad.exe", 101),
+                         88: ("SCP: Secret Laboratory", "scpsl.exe", 303)},
+                        {11: (800, 600), 88: (BIG, BIG)})
+    ctx = ops.OpContext(hwnd=77, logger=lambda m: None)       # 缓存还是重启前的旧句柄
+    check("K20 端到端·游戏重启：旧句柄失效 → 打到新句柄 88",
+          (ops.run_item({"type": "minimize_game", "params": {}}, ctx), sorted(world.iconic)),
+          ((True, "已把游戏最小化（窗口换了，已重找）"), [88]))
+
+    # 句柄被系统回收给了别的程序（77 现在是 notepad）
+    world = _fake_world({11: ("chrome - 记事本", "notepad.exe", 101),
+                         77: ("另一个记事本", "notepad.exe", 404),
+                         88: ("SCP: Secret Laboratory", "scpsl.exe", 303)},
+                        {11: (800, 600), 77: (300, 300), 88: (BIG, BIG)})
+    ctx = ops.OpContext(hwnd=77, logger=lambda m: None)
+    check("K21 端到端·句柄被回收：只动真游戏窗口，绝不碰别人的 77",
+          (ops.run_item({"type": "minimize_game", "params": {}}, ctx), sorted(world.iconic)),
+          ((True, "已把游戏最小化（窗口换了，已重找）"), [88]))
+
+    world = _fake_world({11: ("chrome - 记事本", "notepad.exe", 101)})
+    ctx = ops.OpContext(hwnd=0, logger=lambda m: None)
+    check("K22 端到端·游戏没开：老实报失败，一个窗口都不动",
+          (ops.run_item({"type": "minimize_game", "params": {}}, ctx), sorted(world.iconic)),
+          ((False, "没找到游戏窗口（游戏没开？）"), []))
+    check("K23 端到端：死句柄直接判 False（复核生效）", w32.minimize_window(77), False)
+
+    world = _fake_world({88: ("SCP: Secret Laboratory", "scpsl.exe", 303)}, {88: (BIG, BIG)})
+    world.iconic.add(88)
+    check("K24 端到端·切前台：还原 + 真到前台才算成功",
+          (w32.focus_window(88), sorted(world.iconic), world.fg), (True, [], 88))
+    world.deny_fg = True
+    world.fg = 11                                             # 前台被别的程序占着
+    ok("K25 端到端·系统不给你前台 → 报失败（不谎报成功）",
+       w32.focus_window(88) is False)
+    # 用户实测踩到的两类误报：异步 + 到前台的不是我们操作的那个句柄
+    world = _fake_world({88: ("SCP: Secret Laboratory", "scpsl.exe", 303),
+                         89: ("SCP: Secret Laboratory", "scpsl.exe", 303)},
+                        {88: (BIG, BIG), 89: (400, 300)})
+    world.fg_becomes = 89                                     # 系统把同进程的另一个窗口推到前台
+    ok("K26 端到端·前台是同进程的另一个窗口 → 算成功（不误报）",
+       w32.focus_window(88) is True)
+
+    world = _fake_world({88: ("SCP: Secret Laboratory", "scpsl.exe", 303)}, {88: (BIG, BIG)})
+    world.fg_old, world.fg_delay = 11, 2                      # 头两次查到的还是旧前台
+    ok("K27 端到端·切前台是异步的 → 等它一下再判（不误报）",
+       w32.focus_window(88) is True)
+
+    world = _fake_world({88: ("SCP: Secret Laboratory", "scpsl.exe", 303)}, {88: (BIG, BIG)})
+    world.iconic_delay = 2                                    # 头两次查还没最小化完
+    ok("K28 端到端·最小化延迟生效 → 仍算成功（不误报）",
+       w32.minimize_window(88) is True)
+finally:
+    w32.user32, w32.kernel32, w32.list_windows = _real_dlls
+
+ok("K29 非 Windows 上 pid_of / foreground_is 安全退化",
+   w32.pid_of(1234) == 0 and w32.foreground_is(1234) is False)
 
 # ============================================================ 结果
 shutil.rmtree(TMP, ignore_errors=True)

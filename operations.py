@@ -21,6 +21,9 @@
 | `run_file`        | 执行文件     | path   | **是**    |
 
 * `target` = 窗口的**标题或进程名**（执行时现搜窗口，所以程序随时开关都行）。
+* **游戏窗口**（`切换到游戏界面` / `游戏最小化`）：执行时**现查**（进程名含 `scpsl`）。
+  上次记住的句柄会**先验证、再用**，验不过就重新找 —— 游戏重启换窗口也照样生效，
+  也不会因为句柄被系统回收而去操作别人的窗口。
 * `path` = 文件完整路径（执行 = 像双击一样打开）。
 
 条目结构：`{"type": "open_url", "params": {"url": "https://..."}}`
@@ -207,11 +210,13 @@ class OpContext:
 
     def __init__(self, audio=None, hwnd=None, logger=None):
         self.audio = audio
-        self.hwnd = hwnd                 # int 或 返回 int 的可调用对象
+        self.hwnd = hwnd                 # int 或 返回 int 的可调用对象（**只是线索**，用前现验）
         self.log = logger or log
         self.open_url = open_url_default
         self.open_file = open_file_default
         self.lookup_window = win32_window.find_window
+        self.find_game = win32_window.find_game_window     # 现查游戏窗口
+        self.is_game = win32_window.is_game_window         # 现验句柄还是不是游戏窗口
         self.focus = win32_window.focus_window
         self.minimize = win32_window.minimize_window
 
@@ -221,6 +226,22 @@ class OpContext:
             return int(h or 0)
         except Exception:
             return 0
+
+    def game_hwnd_live(self):
+        """定位游戏窗口：缓存的句柄**验过**才用，否则**现查**。
+
+        返回 `(hwnd, 是否重找过)`。游戏重启会换句柄，所以绝不能直接信任缓存值；
+        句柄还可能被系统回收给别的程序，验不过就必须重找（否则会操作错窗口）。
+        """
+        h = self.game_hwnd()
+        if h and self.is_game(h):
+            return h, False
+        h2 = self.find_game()
+        try:
+            h2 = int(h2 or 0)
+        except Exception:
+            h2 = 0
+        return h2, bool(h and h2 and h2 != h)       # 只有"原来有缓存但换了"才算重找
 
     def emit(self, msg):
         self.log(msg)
@@ -251,19 +272,23 @@ def _run_open_url(params, ctx):
 
 
 def _run_focus_game(params, ctx):
-    hwnd = ctx.game_hwnd()
+    hwnd, refound = ctx.game_hwnd_live()
     if not hwnd:
-        return False, "还没锁定 SCPSL 窗口（游戏没开？）"
+        return False, "没找到游戏窗口（游戏没开？）"
     ok = ctx.focus(hwnd)
-    return bool(ok), ("已切到游戏界面" if ok else "切换到游戏界面失败")
+    if not ok:
+        return False, "切换游戏界面没生效（窗口没到前台）"
+    return True, "已切到游戏界面" + ("（窗口换了，已重找）" if refound else "")
 
 
 def _run_minimize_game(params, ctx):
-    hwnd = ctx.game_hwnd()
+    hwnd, refound = ctx.game_hwnd_live()
     if not hwnd:
-        return False, "还没锁定 SCPSL 窗口（游戏没开？）"
+        return False, "没找到游戏窗口（游戏没开？）"
     ok = ctx.minimize(hwnd)
-    return bool(ok), ("已把游戏最小化" if ok else "游戏最小化失败")
+    if not ok:
+        return False, "游戏最小化没生效（窗口可能已变）"
+    return True, "已把游戏最小化" + ("（窗口换了，已重找）" if refound else "")
 
 
 def _run_focus_window(params, ctx):

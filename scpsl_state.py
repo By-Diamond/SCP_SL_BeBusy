@@ -275,6 +275,20 @@ def find_scpsl_windows():
     return found
 
 
+def is_game_window(hwnd):
+    """这个句柄**现在**还是不是 SCPSL 的窗口？
+
+    句柄会被系统回收后再发给别的程序，所以**用之前必须现验** ——
+    不能把上次锁定的 hwnd 当长期凭据（游戏重启、句柄回收都会变）。
+    """
+    if not hwnd:
+        return False
+    try:
+        return PROCESS_KEYWORD in proc_name(pid_of(int(hwnd))).lower()
+    except Exception:
+        return False
+
+
 # ----------------------------- 判定核心 -----------------------------
 
 
@@ -400,9 +414,19 @@ class Detector:
         return None
 
     def on_redraw(self, hwnd):
-        """SCPSL 窗口收到 HSHELL_REDRAW → 判存活；只吞死亡那一对的尾跳。"""
-        if hwnd != self.scpsl_hwnd and PROCESS_KEYWORD not in proc_name(pid_of(hwnd)).lower():
-            return                                   # 别的窗口，忽略
+        """SCPSL 窗口收到 HSHELL_REDRAW → 判存活；只吞死亡那一对的尾跳。
+
+        顺带**自愈**：红跳来自另一个游戏窗口（游戏重启过）→ 把锁定改到新句柄，
+        免得窗口操作一直打在一个已经死掉的句柄上。
+        """
+        if hwnd != self.scpsl_hwnd:
+            if not is_game_window(hwnd):
+                return                                   # 别的窗口，忽略
+            with self.lock:
+                old = self.scpsl_hwnd
+                self.scpsl_hwnd = hwnd
+            log("已重新锁定 SCPSL 窗口 hwnd=%d (%s)（旧 hwnd=%d 已失效）"
+                % (hwnd, get_title(hwnd) or "无标题", old))
         now = time.monotonic()
         with self.lock:
             self.counts["redraw"] += 1
@@ -479,9 +503,23 @@ class Detector:
     # ---------- Shell 钩子（自建隐藏窗口，只读） ----------
 
     def _find_scpsl(self):
+        """现查游戏窗口并记录；查不到就记 0（**不保留过期句柄**）。返回句柄是否变了。"""
         wins = find_scpsl_windows()
-        if wins:
-            self.scpsl_hwnd = wins[0]["hwnd"]
+        hwnd = int(wins[0]["hwnd"]) if wins else 0
+        changed = hwnd != self.scpsl_hwnd
+        self.scpsl_hwnd = hwnd
+        return changed
+
+    def _log_lock(self, rescan=False):
+        """锁定 / 重锁窗口都写一行日志（以前重锁成功是静默的，出问题难查）。"""
+        if self.scpsl_hwnd:
+            log("已%s锁定 SCPSL 窗口 hwnd=%d (%s)"
+                % ("重新" if rescan else "", self.scpsl_hwnd,
+                   get_title(self.scpsl_hwnd) or "无标题"))
+        elif rescan:
+            log("SCPSL 窗口已失效（游戏关了？等它回来）")
+        else:
+            log("还没找到 SCPSL 窗口（游戏没开？找到后自动锁定）")
 
     def shell_hook_loop(self):
         try:
@@ -518,11 +556,7 @@ class Detector:
             log("⚠ Shell 钩子注册失败：复活检测将失效")
             return
         self._find_scpsl()
-        if self.scpsl_hwnd:
-            log("已锁定 SCPSL 窗口 hwnd=%d (%s)"
-                % (self.scpsl_hwnd, get_title(self.scpsl_hwnd) or "无标题"))
-        else:
-            log("还没找到 SCPSL 窗口（游戏没开？找到后自动锁定）")
+        self._log_lock()
         log("Shell 钩子已就绪（复活检测生效）")
 
         msg = wintypes.MSG()
@@ -533,9 +567,11 @@ class Detector:
                 user32.DispatchMessageW(ctypes.byref(msg))
             else:
                 time.sleep(0.02)
-                if not self.scpsl_hwnd and time.monotonic() - last_find >= 1.0:
+                # 1s 查一次：没锁定、或锁定的句柄已失效（游戏重启/退出）→ 重找
+                if time.monotonic() - last_find >= 1.0:
                     last_find = time.monotonic()
-                    self._find_scpsl()               # 等游戏启动，1s 找一次
+                    if not is_game_window(self.scpsl_hwnd) and self._find_scpsl():
+                        self._log_lock(rescan=True)
         try:
             user32.DeregisterShellHookWindow(hwnd)
             user32.DestroyWindow(hwnd)
