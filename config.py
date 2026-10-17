@@ -20,12 +20,13 @@ settings.json 内容
 ------------------
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "player_log": "",                 // 空 = 自动识别
   "log_file": "",                   // 空 = 与配置文件同目录的 SCP_SL_BeBusy.log
   "log_max_mb": 5,
   "log_backups": 2,
   "autostart": false,
+  "death_settle_ms": 700,           // 死亡确认时间（毫秒，500-10000）
   "open_url_default": "https://www.bilibili.com",
   "death_ops": [{"type": "media_play",  "params": {}}],
   "alive_ops": [{"type": "media_pause", "params": {}}],
@@ -48,7 +49,7 @@ _ENV_PERCENT = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%")
 
 APP_NAME = "SCP_SL_BeBusy"
 APP_TITLE = "SCP:SL BeBusy"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 AUTHOR = "By Diamond"
 DESCRIPTION = "自动识别玩家存活/死亡 并执行相关操作，未修改游戏本体，不是作弊行为"
 GAME_NAME = "SCPSL"
@@ -67,6 +68,7 @@ DEFAULTS = {
     "log_max_mb": 5,
     "log_backups": 2,
     "autostart": False,
+    "death_settle_ms": 700,           # 死亡确认时间（毫秒，500-10000；0.7s = 700）
     "open_url_default": "https://www.bilibili.com",
     "death_ops": [{"type": "media_play", "params": {}}],
     "alive_ops": [{"type": "media_pause", "params": {}}],

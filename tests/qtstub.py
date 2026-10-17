@@ -27,6 +27,7 @@ class _Signal(object):
 class Qt(object):
     class ItemDataRole(enum.IntEnum):
         DisplayRole = 0
+        ToolTipRole = 32
         UserRole = 256
 
     class ItemFlag(enum.IntFlag):
@@ -72,6 +73,12 @@ class _Base(object):
 
     def setObjectName(self, n):
         self.objectName_text = n
+
+    def setStyleSheet(self, css):
+        self.style = css
+
+    def setFocus(self):
+        self.focused = True
 
 
 class _Widget(_Base):
@@ -126,6 +133,12 @@ class QLineEdit(_Widget):
 
     def clear(self):
         self._text = ""
+
+    def setReadOnly(self, on):
+        self.readonly = bool(on)
+
+    def isReadOnly(self):
+        return getattr(self, "readonly", False)
 
 
 class QPushButton(_Widget):
@@ -338,6 +351,10 @@ class QInputDialog(_Widget):
     NEXT_TEXT = "NEXT_TEXT"          # 哨兵：表示"用户取消"
     result = None                    # (text, answered)
     calls = []
+    int_result = None                # (value, answered)
+    int_calls = []
+    item_result = None               # (text, answered)
+    item_calls = []
 
     @classmethod
     def getText(cls, parent, title, label, text="", *a, **k):
@@ -347,9 +364,28 @@ class QInputDialog(_Widget):
         return cls.result
 
     @classmethod
+    def getInt(cls, parent, title, label, value=0, minimum=0, maximum=100,
+               step=1, *a, **k):
+        cls.int_calls.append((title, label, value, minimum, maximum))
+        if cls.int_result is None:
+            return value, False
+        return cls.int_result
+
+    @classmethod
+    def getItem(cls, parent, title, label, items, current=0, editable=True, *a, **k):
+        cls.item_calls.append((title, label, list(items or []), current))
+        if cls.item_result is None:
+            return (items or [""])[0], False
+        return cls.item_result
+
+    @classmethod
     def reset(cls):
         cls.result = None
         cls.calls = []
+        cls.int_result = None
+        cls.int_calls = []
+        cls.item_result = None
+        cls.item_calls = []
 
 
 class QFileDialog(_Widget):
@@ -410,9 +446,93 @@ class QTimer(_Base):
 
 
 # 本套测试不构造这几个页面，只为 `import ui.main_window` 能过（名字存在即可）
-for _n in ("QMainWindow", "QStackedWidget", "QStatusBar", "QCheckBox", "QComboBox",
-           "QPlainTextEdit", "QFormLayout", "QSpinBox"):
+for _n in ("QMainWindow", "QStackedWidget", "QStatusBar", "QPlainTextEdit"):
     globals()[_n] = type(_n, (_Widget,), {})
+
+
+class QSpinBox(_Widget):
+    """数字框：范围外的值真的填不进去（和 Qt 一样会夹住）。"""
+
+    def __init__(self, parent=None):
+        _Widget.__init__(self, parent)
+        self._lo, self._hi, self._v = 0, 100, 0
+        self.suffix = ""
+
+    def setRange(self, lo, hi):
+        self._lo, self._hi = int(lo), int(hi)
+
+    def setValue(self, v):
+        self._v = max(self._lo, min(self._hi, int(v)))
+
+    def value(self):
+        return self._v
+
+    def setSuffix(self, s):
+        self.suffix = s
+
+
+class QComboBox(_Widget):
+    """可编辑下拉：`currentText()` = 框里真正的那串字。"""
+
+    def __init__(self, parent=None):
+        _Widget.__init__(self, parent)
+        self.items = []
+        self._data = {}
+        self._text = ""
+        self.editable = False
+        self.currentIndexChanged = self._sig("currentIndexChanged")
+
+    def setEditable(self, on):
+        self.editable = bool(on)
+
+    def addItem(self, text):
+        self.items.append(text)
+
+    def clear(self):
+        self.items = []
+        self._data = {}
+
+    def count(self):
+        return len(self.items)
+
+    def itemText(self, i):
+        return self.items[i]
+
+    def setItemData(self, i, value, role=0):
+        self._data[(int(i), int(role))] = value
+
+    def itemData(self, i, role=0):
+        return self._data.get((int(i), int(role)))
+
+    def setEditText(self, t):
+        self._text = str(t)
+
+    def currentText(self):
+        return self._text
+
+    def setCurrentIndex(self, i):
+        if 0 <= i < len(self.items):
+            self._text = self.items[i]
+
+
+class QCheckBox(_Widget):
+    def __init__(self, text="", parent=None):
+        _Widget.__init__(self, parent)
+        self._text = text
+        self._checked = False
+        self.stateChanged = self._sig("stateChanged")
+
+    def setText(self, t):
+        self._text = t
+
+    def text(self):
+        return self._text
+
+    def setChecked(self, on):
+        self._checked = bool(on)
+
+    def isChecked(self):
+        return self._checked
 
 
 class _Layout(object):
@@ -448,6 +568,18 @@ class QHBoxLayout(_Layout):
     pass
 
 
+class QFormLayout(_Layout):
+    """一行 = (标签, 控件或子布局)。"""
+
+    def __init__(self, parent=None):
+        _Layout.__init__(self)
+        self.rows = []
+
+    def addRow(self, label, field):
+        self.rows.append((label, field))
+        self.widgets.append(field)
+
+
 class _DummyMeta(type):
     def __getattr__(cls, name):
         return _Dummy()
@@ -478,9 +610,9 @@ def install():
     for name in ("QWidget", "QLabel", "QLineEdit", "QPushButton", "QGroupBox",
                  "QListWidget", "QListWidgetItem", "QDialog", "QDialogButtonBox",
                  "QMessageBox", "QInputDialog", "QFileDialog", "QTextBrowser",
-                 "QVBoxLayout", "QHBoxLayout", "QMainWindow", "QStackedWidget",
-                 "QStatusBar", "QCheckBox", "QComboBox", "QPlainTextEdit",
-                 "QFormLayout", "QSpinBox"):
+                 "QVBoxLayout", "QHBoxLayout", "QFormLayout", "QMainWindow",
+                 "QStackedWidget", "QStatusBar", "QCheckBox", "QComboBox",
+                 "QPlainTextEdit", "QSpinBox"):
         setattr(widgets, name, globals()[name])
     gui = types.ModuleType("PySide6.QtGui")
     for name in ("QAction", "QBrush", "QColor", "QFont", "QFontDatabase", "QIcon",

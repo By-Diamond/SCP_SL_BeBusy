@@ -2,7 +2,7 @@
 """托盘：绿点 = 存活（媒体已按复活后的配置处理），红点 = 死亡·观察者。
 
 * 左键点图标 = 显示界面（右键 = 菜单，系统默认行为）。
-* 菜单：显示界面 / 隐藏界面 / 手动播放 / 手动暂停 / 退出。
+* 菜单：显示界面 / 隐藏界面 / 手动对齐媒体状态（播放/暂停，只改程序内状态）/ 退出。
 """
 
 from PySide6.QtCore import QObject, Signal
@@ -29,8 +29,8 @@ class Tray(QObject):
         menu.addAction("显示界面", self.show_requested.emit)
         menu.addAction("隐藏界面", self.hide_requested.emit)
         menu.addSeparator()
-        menu.addAction("手动设置：媒体播放", self.manual_play.emit)
-        menu.addAction("手动设置：媒体暂停", self.manual_pause.emit)
+        menu.addAction("手动设置：当前媒体处于播放状态", self.manual_play.emit)
+        menu.addAction("手动设置：当前媒体处于暂停状态", self.manual_pause.emit)
         menu.addSeparator()
         menu.addAction("退出", self.quit_requested.emit)
         self.menu = menu

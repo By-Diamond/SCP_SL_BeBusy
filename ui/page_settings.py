@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""设置页：开机自启动 / Player.log / 日志文件 / 配置文件位置 / 默认网址。
+"""设置页：死亡判定时间 / 开机自启动 / Player.log / 日志文件 / 配置文件位置 / 默认网址。
 
 **改了立即生效**（不用点保存）：
+* 死亡判定时间（500-10000ms）→ 下一张死亡门就用新值；
 * Player.log 路径 → 立刻重挂监听；
 * 日志文件路径与大小 → 立刻切换；
 * 开机自启动 → 立刻写/删注册表；
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QGroupBox,
 
 import autostart
 import config as cfgmod
+import trigger
 from ui import util
 
 
@@ -31,6 +33,7 @@ class SettingsPage(QWidget):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(10)
 
+        root.addWidget(self._build_settle())
         root.addWidget(self._build_autostart())
         root.addWidget(self._build_player_log())
         root.addWidget(self._build_log_file())
@@ -44,6 +47,50 @@ class SettingsPage(QWidget):
 
         self._loading = False
         self.refresh()
+
+    # ---------------- 死亡判定时间 ----------------
+
+    def _build_settle(self):
+        """死亡判定时间（毫秒）：闭区间 [500, 10000]，改完立即生效。"""
+        box = QGroupBox("判定（死亡确认时间）")
+        form = QFormLayout(box)
+
+        row = QHBoxLayout()
+        self.sp_settle = QSpinBox()
+        self.sp_settle.setRange(trigger.SETTLE_MIN_MS, trigger.SETTLE_MAX_MS)
+        self.sp_settle.setSuffix(" ms")
+        self.sp_settle.valueChanged.connect(self.on_settle)
+        row.addWidget(QLabel("死亡后保持："))
+        row.addWidget(self.sp_settle)
+        b = QPushButton("应用")
+        b.clicked.connect(lambda: self.on_settle(self.sp_settle.value()))
+        row.addWidget(b)
+        row.addStretch(1)
+        form.addRow("判定：", row)
+
+        self.lbl_settle = QLabel("")
+        self.lbl_settle.setWordWrap(True)
+        form.addRow("状态：", self.lbl_settle)
+        return box
+
+    def on_settle(self, value=None):
+        if self._loading:
+            return
+        v = self.sp_settle.value() if value is None else value
+        ok, msg = self.core.set_death_settle_ms(v)
+        if not ok:
+            # 非法值不写配置：把输入框改回现在生效的值，让用户重新输入
+            self._loading = True
+            try:
+                self.sp_settle.setValue(int(self.core.death_settle_ms))
+            finally:
+                self._loading = False
+            QMessageBox.warning(self, "死亡判定时间", msg)
+            self.set_status("⚠ %s" % msg)
+            return
+        self.lbl_settle.setText("当前生效：%dms（这个时间内复活就当作没死）"
+                                % self.core.death_settle_ms)
+        self.set_status("✔ %s" % msg)
 
     # ---------------- 开机自启动 ----------------
 
@@ -321,6 +368,10 @@ class SettingsPage(QWidget):
     def refresh(self):
         self._loading = True
         try:
+            ms = int(getattr(self.core, "death_settle_ms",
+                             int(round(trigger.DEATH_SETTLE_S * 1000))))
+            self.sp_settle.setValue(ms)
+            self.lbl_settle.setText("当前生效：%dms（这个时间内复活就当作没死）" % ms)
             self.cb_autostart.setChecked(bool(self.core.cfg.get("autostart")))
             self.refresh_autostart_label()
 

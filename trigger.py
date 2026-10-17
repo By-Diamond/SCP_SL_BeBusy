@@ -14,7 +14,9 @@
 
 import threading
 
-DEATH_SETTLE_S = 0.7
+DEATH_SETTLE_S = 0.7                # 默认 0.7s（= 700ms），可在设置页改成 500-10000ms
+SETTLE_MIN_MS = 500
+SETTLE_MAX_MS = 10000
 
 _logger = print
 
@@ -31,6 +33,22 @@ def log(msg):
         pass
 
 
+def coerce_settle_ms(raw):
+    """死亡确认时间（毫秒）。合法范围是**闭区间** [500, 10000]。返回 (ok, int 或 原因)。"""
+    s = str(raw if raw is not None else "").strip().rstrip("ms").strip()
+    if s == "":
+        return False, "还没填死亡判定时间"
+    try:
+        v = int(float(s))
+    except Exception:
+        return False, ("死亡判定时间要填 %d-%d 之间的整数毫秒（现在填的是 %r）"
+                       % (SETTLE_MIN_MS, SETTLE_MAX_MS, raw))
+    if not (SETTLE_MIN_MS <= v <= SETTLE_MAX_MS):
+        return False, ("死亡判定时间必须在 %d-%d 毫秒之间（现在填的是 %s）"
+                       % (SETTLE_MIN_MS, SETTLE_MAX_MS, v))
+    return True, v
+
+
 class Trigger:
     """把状态信号变成动作列表执行。`is_dead` 是可调用对象（返回当前是否死亡）。"""
 
@@ -40,11 +58,18 @@ class Trigger:
         self.run_death = run_death
         self.run_alive = run_alive
         self.settle_s = float(settle_s)
+        self.settle_ms = int(round(self.settle_s * 1000))
         self.log = logger if logger is not None else log
         self.lock = threading.RLock()
         self.timer = None
         self.applied = None            # None / "dead" / "alive"
         self.death_reason = ""
+
+    def set_settle_ms(self, ms):
+        """改死亡确认时间（毫秒）→ **立即生效**（下一张死亡门就用新值）。"""
+        self.settle_ms = int(ms)
+        self.settle_s = self.settle_ms / 1000.0
+        return self.settle_ms
 
     # ---------------- 内部 ----------------
 
@@ -70,8 +95,8 @@ class Trigger:
             t.daemon = True
             self.timer = t
             t.start()
-        self.log("[gate] 死亡信号（%s）→ 等 %.1fs 确认；这期间复活则完全不动作"
-                 % (reason or "?", self.settle_s))
+        self.log("[gate] 死亡信号（%s）→ 等 %dms 确认；这期间复活则完全不动作"
+                 % (reason or "?", self.settle_ms))
 
     def on_alive(self, reason="", detail=""):
         """存活信号（REDRAW）：立即跑「复活后」列表；取消未到期的死亡门。"""
@@ -97,14 +122,14 @@ class Trigger:
         with self.lock:
             self.timer = None
         if not self.is_dead():
-            self.log("[gate] 死亡后 %.1fs 内状态已变（复活）→ 取消，不作任何操作"
-                     % self.settle_s)
+            self.log("[gate] 死亡后 %dms 内状态已变（复活）→ 取消，不作任何操作"
+                     % self.settle_ms)
             return
         with self.lock:
             if self.applied == "dead":
                 return
             self.applied = "dead"
-        self.log("[action] 死亡保持 %.1fs 未复活 → 执行「死亡后」动作列表" % self.settle_s)
+        self.log("[action] 死亡保持 %dms 未复活 → 执行「死亡后」动作列表" % self.settle_ms)
         self._safe(self.run_death, self.death_reason, "")
 
     @staticmethod

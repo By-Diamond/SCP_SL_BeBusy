@@ -130,23 +130,32 @@ class OpBox(QGroupBox):
         return True
 
     def _ask_params(self, spec, current, title):
-        """按参数表逐个问（网址/窗口/文件各有专用弹窗）。返回 (kwargs, 是否继续)。"""
-        values = {}
-        for key, label, default, hint in spec.params:
+        """**一个操作一个窗口**：把这个操作的所有参数一次填完。
+
+        * **新建**时用「按框预填」的默认值（死了→静音 / 说"你已死亡"；活了→恢复 / "你已复活"）；
+        * 标成 optional 的参数可以留空；
+        * 窗口里点「确定」时会跑一遍必填 + `OpSpec.validate`，不合格**就地提示、不关窗**。
+        """
+        values = self._initial_params(spec, current)
+        got, answered = op_dialog.ask_params(self, spec, values, title, self.which)
+        if not answered:
+            return {}, False
+        return got, True
+
+    def _initial_params(self, spec, current):
+        """窗口里一开始显示的值（改配置的时候就是原值）。"""
+        is_new = not current
+        out = {}
+        for key, _label, default, _hint in spec.params:
             cur = (current or {}).get(key) or ""
+            if not cur and is_new:
+                cur = operations.prefill_for(spec.type, key, self.which)
             if not cur:
                 # 新建时「打开网页」用配置里的默认网址
                 cur = (self.core.cfg.get("open_url_default") or "") if key == "url" \
                     else (default or "")
-            val, answered = op_dialog.ask_param(self, key, label, cur, hint)
-            if not answered:
-                return {}, False
-            val = (val or "").strip()
-            if not val:
-                QMessageBox.warning(self, title, "「%s」不能为空。" % label)
-                return {}, False
-            values[key] = val
-        return values, True
+            out[key] = cur
+        return out
 
     def edit(self):
         i = self.list.currentRow()
@@ -207,6 +216,7 @@ class OpBox(QGroupBox):
 class FeaturePage(QWidget):
     def __init__(self, core, parent=None):
         super().__init__(parent)
+        self.core = core
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
@@ -216,7 +226,7 @@ class FeaturePage(QWidget):
         root.addWidget(tip)
 
         row = QHBoxLayout()
-        self.death_box = OpBox(core, "death", "死亡后（保持 0.7s 未复活才执行）")
+        self.death_box = OpBox(core, "death", self._death_title())
         self.alive_box = OpBox(core, "alive", "复活后（立即执行）")
         row.addWidget(self.death_box, 1)
         row.addWidget(self.alive_box, 1)
@@ -226,6 +236,16 @@ class FeaturePage(QWidget):
         note.setWordWrap(True)
         root.addWidget(note)
 
+    def _death_title(self):
+        """框标题跟着设置页里的「死亡判定时间」走。"""
+        try:
+            ms = int(getattr(self.core, "death_settle_ms", 700))
+        except Exception:
+            ms = 700
+        return "死亡后（保持 %dms 未复活才执行）" % ms
+
     def sync_from_config(self):
+        if hasattr(self.death_box, "setTitle"):          # 桩里没有也不影响功能
+            self.death_box.setTitle(self._death_title())
         self.death_box.sync_from_config()
         self.alive_box.sync_from_config()
